@@ -1,0 +1,11 @@
+// Wise custom Sass rules for R Shiny (golem + bslib)
+// All colors/fonts are defined in fct_theme.R via bs_theme().
+// This file is for additional layout rules only — use $primary, $secondary, etc.
+
+.card {
+  border-left: 3px solid $primary;
+}
+
+.sidebar {
+  border-right: 1px solid $secondary;
+}

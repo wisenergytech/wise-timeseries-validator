@@ -1,0 +1,20 @@
+# R
+.Rhistory
+.RData
+.Rproj.user/
+
+# renv (keep renv.lock and activate.R, ignore the rest)
+renv/library/
+renv/local/
+renv/staging/
+renv/sandbox/
+
+# Local env files
+.env
+.env.*
+!.env.example
+
+# IDE
+.DS_Store
+.idea/
+.vscode/
