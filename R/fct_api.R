@@ -206,10 +206,11 @@ clean_timeseries <- function(data,
     }
   }
 
-  # Step 3: Clean outliers
+  # Step 3: Clean outliers (STL-aware detection on cleaned data)
   for (col in value_cols) {
     outliers <- detect_outliers_iqr(new_dt[[col]], timestamps,
-                                    k = config$iqr_k)
+                                    k = config$iqr_k,
+                                    time_step = time_step)
     if (nrow(outliers) > 0) {
       result <- clean_outliers(new_dt[[col]], new_sources[[col]],
                                outliers, timestamps, time_step)

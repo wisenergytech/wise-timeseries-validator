@@ -83,14 +83,18 @@ detect_outliers_iqr <- function(values, timestamps, k = 3,
   if (sum(non_na) < 10) return(empty)
 
   # Try STL-based detection (forecast::tsoutliers)
+  # tsoutliers handles NAs internally via na.interp
   stl_idx <- tryCatch({
-    # Determine frequency from time_step
     freq <- .infer_frequency(time_step)
-    if (!is.null(freq) && freq >= 2 && length(values) >= freq * 2) {
-      ts_obj <- stats::ts(values, frequency = freq)
-      # tsoutliers returns indices and replacements
+    if (!is.null(freq) && freq >= 2 && sum(non_na) >= freq * 2) {
+      # Fill NAs temporarily for STL decomposition
+      vals_filled <- zoo::na.approx(values, na.rm = FALSE)
+      vals_filled[is.na(vals_filled)] <- stats::median(values, na.rm = TRUE)
+      ts_obj <- stats::ts(vals_filled, frequency = freq)
       outlier_info <- forecast::tsoutliers(ts_obj, iterate = 2)
-      outlier_info$index
+      # Only keep indices that were not NA in original
+      idx <- outlier_info$index
+      idx[non_na[idx]]
     } else {
       NULL
     }
@@ -104,13 +108,20 @@ detect_outliers_iqr <- function(values, timestamps, k = 3,
     ))
   }
 
-  # Fallback: hybrid IQR (absolute + delta)
-  .detect_outliers_hybrid(values, timestamps, k)
+  # Fallback: delta-only IQR (not absolute — avoids flagging
+  # natural day/night amplitude as outliers)
+  .detect_outliers_delta(values, timestamps, k)
 }
 
-#' Fallback hybrid outlier detection (absolute IQR + delta IQR)
+#' Fallback delta-only outlier detection
+#'
+#' Only flags points where the consecutive difference (jump) is extreme.
+#' Does NOT flag absolute values — this avoids false positives from
+#' natural day/night cycles or seasonal amplitude variation.
+#' A point is flagged if BOTH the incoming and outgoing deltas are extreme
+#' (isolated spike), not just one (which could be a legitimate level shift).
 #' @noRd
-.detect_outliers_hybrid <- function(values, timestamps, k = 3) {
+.detect_outliers_delta <- function(values, timestamps, k = 3) {
   empty <- data.table::data.table(
     timestamp = as.POSIXct(character(0)),
     value = numeric(0),
@@ -118,42 +129,33 @@ detect_outliers_iqr <- function(values, timestamps, k = 3,
   )
 
   non_na <- !is.na(values)
-  clean_vals <- values[non_na]
-  if (length(clean_vals) < 10) return(empty)
+  if (sum(non_na) < 10) return(empty)
 
-  # Absolute value fences
-  q_abs <- stats::quantile(clean_vals, probs = c(0.25, 0.75))
-  iqr_abs <- q_abs[2] - q_abs[1]
-  abs_outlier <- rep(FALSE, length(values))
-  if (iqr_abs > 0) {
-    abs_outlier <- non_na &
-      (values < q_abs[1] - k * iqr_abs | values > q_abs[2] + k * iqr_abs)
-  }
-
-  # Delta fences
   deltas <- c(NA_real_, diff(values))
   clean_deltas <- deltas[!is.na(deltas)]
-  delta_outlier <- rep(FALSE, length(values))
-  if (length(clean_deltas) >= 10) {
-    q_d <- stats::quantile(clean_deltas, probs = c(0.25, 0.75))
-    iqr_d <- q_d[2] - q_d[1]
-    if (iqr_d > 0) {
-      delta_outlier <- !is.na(deltas) &
-        (deltas < q_d[1] - k * iqr_d | deltas > q_d[2] + k * iqr_d)
-    }
-  }
+  if (length(clean_deltas) < 10) return(empty)
 
-  either <- which(abs_outlier | delta_outlier)
-  if (length(either) == 0) return(empty)
+  q_d <- stats::quantile(clean_deltas, probs = c(0.25, 0.75))
+  iqr_d <- q_d[2] - q_d[1]
+  if (iqr_d <= 0) return(empty)
 
-  method <- ifelse(
-    abs_outlier[either] & delta_outlier[either], "both",
-    ifelse(abs_outlier[either], "absolute", "delta"))
+  lower <- q_d[1] - k * iqr_d
+  upper <- q_d[2] + k * iqr_d
+
+  # A spike = extreme jump IN followed by extreme jump OUT
+  delta_in_extreme <- !is.na(deltas) & (deltas < lower | deltas > upper)
+  delta_out <- c(diff(values), NA_real_)
+  delta_out_extreme <- !is.na(delta_out) &
+    (delta_out < lower | delta_out > upper)
+
+  # Both directions extreme = isolated spike (not a level shift)
+  spike_idx <- which(delta_in_extreme & delta_out_extreme & non_na)
+  if (length(spike_idx) == 0) return(empty)
 
   data.table::data.table(
-    timestamp = timestamps[either],
-    value = values[either],
-    method = method
+    timestamp = timestamps[spike_idx],
+    value = values[spike_idx],
+    method = rep("delta_spike", length(spike_idx))
   )
 }
 
