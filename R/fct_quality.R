@@ -1,20 +1,21 @@
 # ── Quality Detection Functions ───────────────────────────────────────────────
 #
-# Industry standards referenced:
-#   - IEC 61724-2 §6.3: sensor malfunction detection (stuck, range)
+# Detection powered by:
+#   - forecast::tsoutliers (STL decomposition + IQR, handles seasonality)
+#   - imputeTS::statsNA (gap statistics)
+#   - Custom RLE (stuck-dump patterns — no package covers this)
+#
+# Industry standards:
+#   - IEC 61724-2 §6.3: sensor malfunction detection
 #   - IEC 61724-3 §5.2: data availability and gap classification
 #   - ASHRAE Guideline 14 §5.3.2: statistical outlier screening
-#   - ISO 17025 / JCGM 100: measurement uncertainty principles
 
 #' Detect gaps in a timeseries
 #'
-#' A gap is where the interval between consecutive timestamps exceeds the
-#' expected time step. Gaps are classified by duration into 3 severity levels:
-#'   - L1 (< gap_l1_hours): small, suitable for linear interpolation
+#' Gaps classified by duration into 3 severity levels:
+#'   - L1 (<= gap_l1_hours): small, suitable for linear interpolation
 #'   - L2 (gap_l1_hours to gap_l2_hours): medium, needs profile-based filling
 #'   - L3 (> gap_l2_hours): large, should be excluded
-#'
-#' Ref: IEC 61724-3 §5.2 (data availability requirements)
 #'
 #' @param timestamps Sorted POSIXct vector.
 #' @param time_step difftime representing the expected interval.
@@ -33,7 +34,6 @@ detect_gaps <- function(timestamps, time_step, config) {
 
   diffs_secs <- diff(as.numeric(timestamps))
   step_secs <- as.numeric(time_step, units = "secs")
-  # Allow 50% tolerance for minor irregularities
   gap_idx <- which(diffs_secs > step_secs * 1.5)
 
   if (length(gap_idx) == 0) return(empty)
@@ -45,39 +45,72 @@ detect_gaps <- function(timestamps, time_step, config) {
 
   l1 <- config$gap_l1_hours
   l2 <- config$gap_l2_hours
-
   severity <- ifelse(durations <= l1, "L1",
                ifelse(durations <= l2, "L2", "L3"))
 
   data.table::data.table(
-    start = starts,
-    end = ends,
-    duration = durations,
-    n_missing = n_missing,
+    start = starts, end = ends,
+    duration = durations, n_missing = n_missing,
     severity = severity
   )
 }
 
-#' Detect outliers using hybrid IQR method (values + deltas)
+#' Detect outliers using STL decomposition + IQR (seasonal-aware)
 #'
-#' Two complementary detection strategies:
-#'   1. Absolute: values outside [Q1 - k*IQR, Q3 + k*IQR] (catches extreme
-#'      magnitudes)
-#'   2. Delta: consecutive differences outside [Q1 - k*IQR, Q3 + k*IQR]
-#'      (catches sudden jumps even when absolute value is in range)
+#' Uses forecast::tsoutliers which decomposes the signal via STL (Seasonal
+#' and Trend decomposition using Loess), then applies IQR fences on the
+#' remainder component. This correctly handles periodic patterns that would
+#' be false positives with naive IQR.
 #'
-#' A point flagged by either method is considered an outlier.
-#'
-#' Ref: ASHRAE Guideline 14 §5.3.2 (statistical outlier screening)
-#'      Tukey, J.W. (1977). Exploratory Data Analysis.
+#' Falls back to a simpler hybrid IQR (absolute + delta) when the series
+#' is too short for STL decomposition (< 2 full periods).
 #'
 #' @param values Numeric vector.
 #' @param timestamps POSIXct vector (same length as values).
 #' @param k IQR multiplier for Tukey fences (default 3).
-#' @return data.table with columns: timestamp, value, method
-#'   (method = "absolute", "delta", or "both").
+#' @param time_step difftime for frequency detection.
+#' @return data.table with columns: timestamp, value, method.
 #' @noRd
-detect_outliers_iqr <- function(values, timestamps, k = 3) {
+detect_outliers_iqr <- function(values, timestamps, k = 3,
+                                time_step = NULL) {
+  empty <- data.table::data.table(
+    timestamp = as.POSIXct(character(0)),
+    value = numeric(0),
+    method = character(0)
+  )
+
+  non_na <- !is.na(values)
+  if (sum(non_na) < 10) return(empty)
+
+  # Try STL-based detection (forecast::tsoutliers)
+  stl_idx <- tryCatch({
+    # Determine frequency from time_step
+    freq <- .infer_frequency(time_step)
+    if (!is.null(freq) && freq >= 2 && length(values) >= freq * 2) {
+      ts_obj <- stats::ts(values, frequency = freq)
+      # tsoutliers returns indices and replacements
+      outlier_info <- forecast::tsoutliers(ts_obj, iterate = 2)
+      outlier_info$index
+    } else {
+      NULL
+    }
+  }, error = function(e) NULL)
+
+  if (!is.null(stl_idx) && length(stl_idx) > 0) {
+    return(data.table::data.table(
+      timestamp = timestamps[stl_idx],
+      value = values[stl_idx],
+      method = rep("stl_iqr", length(stl_idx))
+    ))
+  }
+
+  # Fallback: hybrid IQR (absolute + delta)
+  .detect_outliers_hybrid(values, timestamps, k)
+}
+
+#' Fallback hybrid outlier detection (absolute IQR + delta IQR)
+#' @noRd
+.detect_outliers_hybrid <- function(values, timestamps, k = 3) {
   empty <- data.table::data.table(
     timestamp = as.POSIXct(character(0)),
     value = numeric(0),
@@ -88,34 +121,28 @@ detect_outliers_iqr <- function(values, timestamps, k = 3) {
   clean_vals <- values[non_na]
   if (length(clean_vals) < 10) return(empty)
 
-  # --- Strategy 1: Absolute value fences ---
+  # Absolute value fences
   q_abs <- stats::quantile(clean_vals, probs = c(0.25, 0.75))
   iqr_abs <- q_abs[2] - q_abs[1]
   abs_outlier <- rep(FALSE, length(values))
   if (iqr_abs > 0) {
-    lower_abs <- q_abs[1] - k * iqr_abs
-    upper_abs <- q_abs[2] + k * iqr_abs
-    abs_outlier <- non_na & (values < lower_abs | values > upper_abs)
+    abs_outlier <- non_na &
+      (values < q_abs[1] - k * iqr_abs | values > q_abs[2] + k * iqr_abs)
   }
 
-  # --- Strategy 2: Delta (consecutive difference) fences ---
+  # Delta fences
   deltas <- c(NA_real_, diff(values))
   clean_deltas <- deltas[!is.na(deltas)]
   delta_outlier <- rep(FALSE, length(values))
   if (length(clean_deltas) >= 10) {
-    q_delta <- stats::quantile(clean_deltas, probs = c(0.25, 0.75))
-    iqr_delta <- q_delta[2] - q_delta[1]
-    if (iqr_delta > 0) {
-      lower_delta <- q_delta[1] - k * iqr_delta
-      upper_delta <- q_delta[2] + k * iqr_delta
-      is_delta_extreme <- !is.na(deltas) &
-        (deltas < lower_delta | deltas > upper_delta)
-      # A delta outlier flags the point that caused the jump
-      delta_outlier <- is_delta_extreme
+    q_d <- stats::quantile(clean_deltas, probs = c(0.25, 0.75))
+    iqr_d <- q_d[2] - q_d[1]
+    if (iqr_d > 0) {
+      delta_outlier <- !is.na(deltas) &
+        (deltas < q_d[1] - k * iqr_d | deltas > q_d[2] + k * iqr_d)
     }
   }
 
-  # --- Combine ---
   either <- which(abs_outlier | delta_outlier)
   if (length(either) == 0) return(empty)
 
@@ -130,19 +157,26 @@ detect_outliers_iqr <- function(values, timestamps, k = 3) {
   )
 }
 
+#' Infer ts frequency from time_step
+#' @noRd
+.infer_frequency <- function(time_step) {
+  if (is.null(time_step)) return(NULL)
+  step_secs <- as.numeric(time_step, units = "secs")
+  if (is.na(step_secs) || step_secs <= 0) return(NULL)
+  # Daily seasonality: how many steps per day
+  freq <- as.integer(round(86400 / step_secs))
+  if (freq < 2) return(NULL)
+  freq
+}
+
 #' Detect stuck sensor segments using Run Length Encoding
 #'
-#' Consecutive identical values with run length >= min_run are flagged.
-#' Also detects stuck-dump patterns: a stuck segment followed by a spike
-#' that contains the accumulated energy from the stuck period.
-#'
-#' Ref: IEC 61724-2 §6.3 (sensor malfunction detection)
+#' Also detects stuck-dump patterns: a stuck segment followed by a spike.
 #'
 #' @param values Numeric vector.
-#' @param timestamps POSIXct vector (same length as values).
+#' @param timestamps POSIXct vector.
 #' @param min_run Minimum run length to consider stuck (default 6).
-#' @param dump_factor Minimum ratio of dump value to median for stuck-dump
-#'   detection (default 5).
+#' @param dump_factor Minimum spike/median ratio for dump detection (default 5).
 #' @return data.table with columns: start, end, value, run_length,
 #'   has_dump, dump_idx, dump_value.
 #' @noRd
@@ -162,17 +196,12 @@ detect_stuck_rle <- function(values, timestamps, min_run = 6,
 
   r <- rle(values)
   stuck_idx <- which(r$lengths >= min_run & !is.na(r$values))
-
   if (length(stuck_idx) == 0) return(empty)
 
-  # Compute cumulative positions
   ends_pos <- cumsum(r$lengths)
   starts_pos <- ends_pos - r$lengths + 1
-
-  # Median of positive values for dump detection
   typical <- stats::median(values[values > 0 & !is.na(values)], na.rm = TRUE)
 
-  # Check each stuck segment for a dump spike immediately after
   has_dump <- logical(length(stuck_idx))
   dump_idx <- integer(length(stuck_idx))
   dump_value <- numeric(length(stuck_idx))
@@ -200,12 +229,7 @@ detect_stuck_rle <- function(values, timestamps, min_run = 6,
   )
 }
 
-#' Detect negative values in a quantity that should be non-negative
-#'
-#' Flags timesteps where the value is strictly negative. Generic check
-#' applicable to energy, power, flow, or any physical quantity with a
-#' natural zero floor.
-#'
+#' Detect negative values
 #' @param values Numeric vector.
 #' @param timestamps POSIXct vector.
 #' @return data.table with columns: timestamp, value.
@@ -225,15 +249,6 @@ detect_negatives <- function(values, timestamps) {
 }
 
 #' Compute completeness percentage
-#'
-#' completeness = non_missing / expected_count * 100
-#'
-#' Ref: IEC 61724-3 §5.2 (data availability requirements)
-#'
-#' @param values Numeric vector.
-#' @param timestamps POSIXct vector.
-#' @param time_step difftime expected interval.
-#' @return Numeric percentage (0-100).
 #' @noRd
 compute_completeness <- function(values, timestamps, time_step) {
   step_secs <- as.numeric(time_step, units = "secs")
@@ -244,9 +259,7 @@ compute_completeness <- function(values, timestamps, time_step) {
   round(non_missing / expected_count * 100, 1)
 }
 
-#' Compute basic statistics for a numeric vector
-#' @param values Numeric vector.
-#' @return Named list with min, max, mean, sd, Q1, Q3.
+#' Compute basic statistics
 #' @noRd
 compute_stats <- function(values) {
   clean <- values[!is.na(values)]
@@ -255,27 +268,19 @@ compute_stats <- function(values) {
   }
   q <- stats::quantile(clean, probs = c(0.25, 0.75))
   list(
-    min = min(clean),
-    max = max(clean),
-    mean = round(mean(clean), 2),
-    sd = round(stats::sd(clean), 2),
-    Q1 = q[1],
-    Q3 = q[2]
+    min = min(clean), max = max(clean),
+    mean = round(mean(clean), 2), sd = round(stats::sd(clean), 2),
+    Q1 = q[1], Q3 = q[2]
   )
 }
 
 #' Run full diagnostic for a single column
-#'
-#' @param col_name Column name.
-#' @param values Numeric vector of values.
-#' @param timestamps Sorted POSIXct vector.
-#' @param time_step difftime expected interval.
-#' @param config List with iqr_k, rle_min_run, gap_l1_hours, gap_l2_hours.
-#' @return List (QualityDiagnostic) with all diagnostic results.
 #' @noRd
 run_diagnostic <- function(col_name, values, timestamps, time_step, config) {
   gaps <- detect_gaps(timestamps, time_step, config)
-  outliers <- detect_outliers_iqr(values, timestamps, k = config$iqr_k)
+  outliers <- detect_outliers_iqr(values, timestamps,
+                                  k = config$iqr_k,
+                                  time_step = time_step)
   stuck <- detect_stuck_rle(values, timestamps,
                             min_run = config$rle_min_run,
                             dump_factor = config$dump_factor)
@@ -285,15 +290,10 @@ run_diagnostic <- function(col_name, values, timestamps, time_step, config) {
 
   list(
     column_name = col_name,
-    gaps = gaps,
-    outliers = outliers,
-    stuck_segments = stuck,
-    negatives = negatives,
-    completeness = completeness,
-    stats = stats,
-    gap_count = nrow(gaps),
-    outlier_count = nrow(outliers),
-    stuck_count = nrow(stuck),
-    negative_count = nrow(negatives)
+    gaps = gaps, outliers = outliers,
+    stuck_segments = stuck, negatives = negatives,
+    completeness = completeness, stats = stats,
+    gap_count = nrow(gaps), outlier_count = nrow(outliers),
+    stuck_count = nrow(stuck), negative_count = nrow(negatives)
   )
 }

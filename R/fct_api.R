@@ -212,7 +212,7 @@ clean_timeseries <- function(data,
                                     k = config$iqr_k)
     if (nrow(outliers) > 0) {
       result <- clean_outliers(new_dt[[col]], new_sources[[col]],
-                               outliers, timestamps)
+                               outliers, timestamps, time_step)
       new_dt[[col]] <- result$values
       new_sources[[col]] <- result$sources
     }

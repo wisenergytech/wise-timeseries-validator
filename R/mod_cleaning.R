@@ -196,7 +196,7 @@ mod_cleaning_server <- function(id, app_state) {
         outliers <- detect_outliers_iqr(dt[[col]], timestamps,
                                         k = app_state$config$iqr_k)
         if (nrow(outliers) > 0) {
-          result <- clean_outliers(dt[[col]], ds[[col]], outliers, timestamps)
+          result <- clean_outliers(dt[[col]], ds[[col]], outliers, timestamps, app_state$dataset$time_step)
           affected <- sum(result$sources == "outlier_replaced" & ds[[col]] != "outlier_replaced")
           total_affected <- total_affected + affected
           data.table::set(dt, j = col, value = result$values)
@@ -288,7 +288,7 @@ mod_cleaning_server <- function(id, app_state) {
         outliers <- detect_outliers_iqr(new_dt[[col]], timestamps,
                                         k = app_state$config$iqr_k)
         if (nrow(outliers) > 0) {
-          result <- clean_outliers(new_dt[[col]], new_ds[[col]], outliers, timestamps)
+          result <- clean_outliers(new_dt[[col]], new_ds[[col]], outliers, timestamps, app_state$dataset$time_step)
           data.table::set(new_dt, j = col, value = result$values)
           data.table::set(new_ds, j = col, value = result$sources)
         }
