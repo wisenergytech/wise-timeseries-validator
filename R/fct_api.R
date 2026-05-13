@@ -163,7 +163,7 @@ clean_timeseries <- function(data,
   # Build expanded data.table
   new_dt <- data.table::data.table(dummy = seq_along(new_timestamps))
   new_dt[[timestamp_col]] <- new_timestamps
-  new_dt[, dummy := NULL]
+  new_dt[["dummy"]] <- NULL
   for (col in value_cols) {
     new_dt[[col]] <- new_vals[[col]]
   }

@@ -91,10 +91,10 @@ mod_cleaning_server <- function(id, app_state) {
       # Build new data.table with expanded timestamps
       new_dt <- data.table::data.table(dummy = seq_along(new_timestamps))
       new_dt[[ts_col]] <- new_timestamps
-      new_dt[, dummy := NULL]
+      new_dt[["dummy"]] <- NULL
 
       new_ds <- data.table::data.table(dummy = seq_along(new_timestamps))
-      new_ds[, dummy := NULL]
+      new_ds[["dummy"]] <- NULL
 
       # First column already done
       new_dt[[value_cols[1]]] <- result$values
@@ -231,9 +231,9 @@ mod_cleaning_server <- function(id, app_state) {
       new_timestamps <- result$timestamps
       new_dt <- data.table::data.table(dummy = seq_along(new_timestamps))
       new_dt[[ts_col]] <- new_timestamps
-      new_dt[, dummy := NULL]
+      new_dt[["dummy"]] <- NULL
       new_ds <- data.table::data.table(dummy = seq_along(new_timestamps))
-      new_ds[, dummy := NULL]
+      new_ds[["dummy"]] <- NULL
 
       new_dt[[value_cols[1]]] <- result$values
       new_ds[[value_cols[1]]] <- result$sources
