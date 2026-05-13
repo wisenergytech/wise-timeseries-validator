@@ -141,10 +141,10 @@ clean_timeseries <- function(data,
     sources[[col]] <- rep("measured", nrow(dt))
   }
 
-  # Step 1: Fill gaps (expands rows)
+  # Step 1: Fill gaps (expands rows, 3-tier: L1/L2/L3)
   first_col <- value_cols[1]
   result <- fill_gaps(timestamps, dt[[first_col]], sources[[first_col]],
-                      time_step)
+                      time_step, config)
   new_timestamps <- result$timestamps
 
   new_vals <- list()
@@ -154,7 +154,8 @@ clean_timeseries <- function(data,
 
   if (length(value_cols) > 1) {
     for (col in value_cols[-1]) {
-      res <- fill_gaps(timestamps, dt[[col]], sources[[col]], time_step)
+      res <- fill_gaps(timestamps, dt[[col]], sources[[col]],
+                       time_step, config)
       new_vals[[col]] <- res$values
       new_sources[[col]] <- res$sources
     }
@@ -230,6 +231,7 @@ clean_timeseries <- function(data,
       column = col,
       measured = .tbl_count(tbl, "measured"),
       interpolated = .tbl_count(tbl, "interpolated"),
+      profiled = .tbl_count(tbl, "profiled"),
       redistributed = .tbl_count(tbl, "redistributed"),
       reinterpolated = .tbl_count(tbl, "reinterpolated"),
       outlier_replaced = .tbl_count(tbl, "outlier_replaced"),

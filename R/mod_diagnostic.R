@@ -148,6 +148,7 @@ mod_diagnostic_server <- function(id, app_state) {
       ds_colors <- c(
         measured = "#1D4345",
         interpolated = "#E9A345",
+        profiled = "#9B59B6",
         redistributed = "#2ECC71",
         reinterpolated = "#6BAED6",
         outlier_replaced = "#E74C3C",
@@ -199,7 +200,7 @@ mod_diagnostic_server <- function(id, app_state) {
 
       rows <- lapply(names(ds), function(col) {
         tbl <- table(ds[[col]])
-        labels <- c("measured", "interpolated", "redistributed", "reinterpolated", "outlier_replaced", "excluded")
+        labels <- c("measured", "interpolated", "profiled", "redistributed", "reinterpolated", "outlier_replaced", "excluded")
         counts <- vapply(labels, function(l) {
           if (l %in% names(tbl)) as.integer(tbl[l]) else 0L
         }, integer(1))
@@ -209,10 +210,11 @@ mod_diagnostic_server <- function(id, app_state) {
           Column = col,
           Measured = paste0(counts[1], " (", pcts[1], "%)"),
           Interpolated = paste0(counts[2], " (", pcts[2], "%)"),
-          Redistributed = paste0(counts[3], " (", pcts[3], "%)"),
-          Reinterpolated = paste0(counts[4], " (", pcts[4], "%)"),
-          Outlier_Replaced = paste0(counts[5], " (", pcts[5], "%)"),
-          Excluded = paste0(counts[6], " (", pcts[6], "%)"),
+          Profiled = paste0(counts[3], " (", pcts[3], "%)"),
+          Redistributed = paste0(counts[4], " (", pcts[4], "%)"),
+          Reinterpolated = paste0(counts[5], " (", pcts[5], "%)"),
+          Outlier_Replaced = paste0(counts[6], " (", pcts[6], "%)"),
+          Excluded = paste0(counts[7], " (", pcts[7], "%)"),
           check.names = FALSE
         )
       })

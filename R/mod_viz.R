@@ -20,6 +20,7 @@ ds_color_palette <- function() {
   c(
     measured = "#1D4345",
     interpolated = "#E9A345",
+    profiled = "#9B59B6",
     redistributed = "#2ECC71",
     reinterpolated = "#6BAED6",
     outlier_replaced = "#E74C3C",

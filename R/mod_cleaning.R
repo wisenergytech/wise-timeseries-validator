@@ -85,7 +85,7 @@ mod_cleaning_server <- function(id, app_state) {
       total_affected <- 0
 
       # Fill gaps for the first column to get new timestamps
-      result <- fill_gaps(timestamps, dt[[value_cols[1]]], ds[[value_cols[1]]], time_step)
+      result <- fill_gaps(timestamps, dt[[value_cols[1]]], ds[[value_cols[1]]], time_step, app_state$config)
       new_timestamps <- result$timestamps
 
       # Build new data.table with expanded timestamps
@@ -104,7 +104,7 @@ mod_cleaning_server <- function(id, app_state) {
       # Fill remaining columns
       if (length(value_cols) > 1) {
         for (col in value_cols[-1]) {
-          res <- fill_gaps(timestamps, dt[[col]], ds[[col]], time_step)
+          res <- fill_gaps(timestamps, dt[[col]], ds[[col]], time_step, app_state$config)
           new_dt[[col]] <- res$values
           new_ds[[col]] <- res$sources
           total_affected <- total_affected + sum(res$sources %in% c("interpolated", "excluded"))
@@ -227,7 +227,7 @@ mod_cleaning_server <- function(id, app_state) {
       timestamps <- dt[[ts_col]]
 
       # Fill gaps
-      result <- fill_gaps(timestamps, dt[[value_cols[1]]], ds[[value_cols[1]]], time_step)
+      result <- fill_gaps(timestamps, dt[[value_cols[1]]], ds[[value_cols[1]]], time_step, app_state$config)
       new_timestamps <- result$timestamps
       new_dt <- data.table::data.table(dummy = seq_along(new_timestamps))
       new_dt[[ts_col]] <- new_timestamps
@@ -240,7 +240,7 @@ mod_cleaning_server <- function(id, app_state) {
 
       if (length(value_cols) > 1) {
         for (col in value_cols[-1]) {
-          res <- fill_gaps(timestamps, dt[[col]], ds[[col]], time_step)
+          res <- fill_gaps(timestamps, dt[[col]], ds[[col]], time_step, app_state$config)
           new_dt[[col]] <- res$values
           new_ds[[col]] <- res$sources
         }
@@ -367,7 +367,7 @@ mod_cleaning_server <- function(id, app_state) {
 
       rows <- lapply(names(ds), function(col) {
         tbl <- table(ds[[col]])
-        labels <- c("measured", "interpolated", "redistributed", "reinterpolated", "outlier_replaced", "excluded")
+        labels <- c("measured", "interpolated", "profiled", "redistributed", "reinterpolated", "outlier_replaced", "excluded")
         counts <- vapply(labels, function(l) {
           if (l %in% names(tbl)) as.integer(tbl[l]) else 0L
         }, integer(1))
@@ -377,10 +377,11 @@ mod_cleaning_server <- function(id, app_state) {
           Column = col,
           Measured = paste0(counts[1], " (", pcts[1], "%)"),
           Interpolated = paste0(counts[2], " (", pcts[2], "%)"),
-          Redistributed = paste0(counts[3], " (", pcts[3], "%)"),
-          Reinterpolated = paste0(counts[4], " (", pcts[4], "%)"),
-          Outlier_Replaced = paste0(counts[5], " (", pcts[5], "%)"),
-          Excluded = paste0(counts[6], " (", pcts[6], "%)"),
+          Profiled = paste0(counts[3], " (", pcts[3], "%)"),
+          Redistributed = paste0(counts[4], " (", pcts[4], "%)"),
+          Reinterpolated = paste0(counts[5], " (", pcts[5], "%)"),
+          Outlier_Replaced = paste0(counts[6], " (", pcts[6], "%)"),
+          Excluded = paste0(counts[7], " (", pcts[7], "%)"),
           check.names = FALSE
         )
       })
