@@ -81,8 +81,14 @@ diagnose_timeseries <- function(data,
 
 #' Clean a timeseries dataset
 #'
-#' Applies all cleaning operations (gap filling, stuck-dump redistribution,
-#' outlier replacement) and returns the cleaned data with provenance tracking.
+#' Applies cleaning operations in the standard order:
+#'   1. Gap filling (L1/L2/L3)
+#'   2. Stuck-dump redistribution
+#'   3. Outlier replacement
+#'
+#' The \code{operations} parameter controls which steps run. The standard
+#' industry workflow (IEC 61724-3) is to run gap filling first, review,
+#' then run anomaly cleaning on the completed series.
 #'
 #' @param data A data.frame, data.table, or path to a CSV file.
 #' @param timestamp_col Name of the timestamp column. If NULL, auto-detected.
@@ -90,12 +96,16 @@ diagnose_timeseries <- function(data,
 #'   numeric columns are used.
 #' @param config List of detection/cleaning parameters (see
 #'   \code{\link{diagnose_timeseries}} for details).
+#' @param operations Character vector of operations to run. Any combination
+#'   of \code{"gaps"}, \code{"stuck"}, \code{"outliers"}. Default:
+#'   all three. Use \code{"gaps"} alone for gap filling only, or
+#'   \code{c("stuck", "outliers")} for anomaly cleaning only.
 #' @return A list with:
 #'   \describe{
 #'     \item{data}{Cleaned data.table with all original columns.}
 #'     \item{data_source}{data.table of provenance labels per value column
-#'       (values: "measured", "interpolated", "redistributed",
-#'       "outlier_replaced", "excluded").}
+#'       (values: "measured", "interpolated", "profiled", "redistributed",
+#'       "reinterpolated", "outlier_replaced", "excluded").}
 #'     \item{summary}{Per-column cleaning summary (counts by operation).}
 #'     \item{diagnostics}{Post-cleaning diagnostic results.}
 #'   }
@@ -103,7 +113,8 @@ diagnose_timeseries <- function(data,
 clean_timeseries <- function(data,
                              timestamp_col = NULL,
                              value_cols = NULL,
-                             config = list()) {
+                             config = list(),
+                             operations = c("gaps", "stuck", "outliers")) {
   dt <- .ingest(data)
   config <- .merge_config(config)
 
@@ -142,80 +153,93 @@ clean_timeseries <- function(data,
   }
 
   # Step 1: Fill gaps (expands rows, 3-tier: L1/L2/L3)
-  first_col <- value_cols[1]
-  result <- fill_gaps(timestamps, dt[[first_col]], sources[[first_col]],
-                      time_step, config)
-  new_timestamps <- result$timestamps
-
+  new_timestamps <- timestamps
   new_vals <- list()
   new_sources <- list()
-  new_vals[[first_col]] <- result$values
-  new_sources[[first_col]] <- result$sources
+  new_dt <- data.table::copy(dt)
 
-  if (length(value_cols) > 1) {
-    for (col in value_cols[-1]) {
-      res <- fill_gaps(timestamps, dt[[col]], sources[[col]],
-                       time_step, config)
-      new_vals[[col]] <- res$values
-      new_sources[[col]] <- res$sources
+  if ("gaps" %in% operations) {
+    first_col <- value_cols[1]
+    result <- fill_gaps(timestamps, dt[[first_col]], sources[[first_col]],
+                        time_step, config)
+    new_timestamps <- result$timestamps
+
+    new_vals[[first_col]] <- result$values
+    new_sources[[first_col]] <- result$sources
+
+    if (length(value_cols) > 1) {
+      for (col in value_cols[-1]) {
+        res <- fill_gaps(timestamps, dt[[col]], sources[[col]],
+                         time_step, config)
+        new_vals[[col]] <- res$values
+        new_sources[[col]] <- res$sources
+      }
     }
-  }
 
-  # Build expanded data.table
-  new_dt <- data.table::data.table(dummy = seq_along(new_timestamps))
-  new_dt[[timestamp_col]] <- new_timestamps
-  new_dt[["dummy"]] <- NULL
-  for (col in value_cols) {
-    new_dt[[col]] <- new_vals[[col]]
-  }
+    # Build expanded data.table
+    new_dt <- data.table::data.table(dummy = seq_along(new_timestamps))
+    new_dt[[timestamp_col]] <- new_timestamps
+    new_dt[["dummy"]] <- NULL
+    for (col in value_cols) {
+      new_dt[[col]] <- new_vals[[col]]
+    }
 
-  # Preserve non-validated columns (expand with NA)
-  other_cols <- setdiff(names(dt), c(timestamp_col, value_cols))
-  if (length(other_cols) > 0) {
-    old_ts_num <- as.numeric(timestamps)
-    new_ts_num <- as.numeric(new_timestamps)
-    match_idx <- match(old_ts_num, new_ts_num)
-    for (col in other_cols) {
-      expanded <- rep(NA, length(new_timestamps))
-      expanded[match_idx[!is.na(match_idx)]] <-
-        dt[[col]][which(!is.na(match_idx))]
-      new_dt[[col]] <- expanded
+    # Preserve non-validated columns (expand with NA)
+    other_cols <- setdiff(names(dt), c(timestamp_col, value_cols))
+    if (length(other_cols) > 0) {
+      old_ts_num <- as.numeric(timestamps)
+      new_ts_num <- as.numeric(new_timestamps)
+      match_idx <- match(old_ts_num, new_ts_num)
+      for (col in other_cols) {
+        expanded <- rep(NA, length(new_timestamps))
+        expanded[match_idx[!is.na(match_idx)]] <-
+          dt[[col]][which(!is.na(match_idx))]
+        new_dt[[col]] <- expanded
+      }
+    }
+  } else {
+    # No gap filling: keep original structure
+    for (col in value_cols) {
+      new_vals[[col]] <- dt[[col]]
+      new_sources[[col]] <- sources[[col]]
     }
   }
 
   timestamps <- new_timestamps
 
   # Step 2: Clean stuck-dump patterns
-  for (col in value_cols) {
-    stuck <- detect_stuck_rle(new_dt[[col]], timestamps,
-                              min_run = config$rle_min_run,
-                              dump_factor = config$dump_factor)
-    if (nrow(stuck) > 0 && any(stuck$has_dump)) {
-      result <- clean_stuck_dump(new_dt[[col]], timestamps,
-                                 new_sources[[col]], stuck)
-      new_dt[[col]] <- result$values
-      new_sources[[col]] <- result$sources
-    }
-    # Also clean remaining stuck segments (without dump) by interpolation
-    stuck_no_dump <- stuck[!stuck$has_dump, ]
-    if (nrow(stuck_no_dump) > 0) {
-      result <- clean_stuck(new_dt[[col]], new_sources[[col]],
-                            stuck_no_dump)
-      new_dt[[col]] <- result$values
-      new_sources[[col]] <- result$sources
+  if ("stuck" %in% operations) {
+    for (col in value_cols) {
+      stuck <- detect_stuck_rle(new_dt[[col]], timestamps,
+                                min_run = config$rle_min_run,
+                                dump_factor = config$dump_factor)
+      if (nrow(stuck) > 0 && any(stuck$has_dump)) {
+        result <- clean_stuck_dump(new_dt[[col]], timestamps,
+                                   new_sources[[col]], stuck)
+        new_dt[[col]] <- result$values
+        new_sources[[col]] <- result$sources
+      }
+      stuck_no_dump <- stuck[!stuck$has_dump, ]
+      if (nrow(stuck_no_dump) > 0) {
+        result <- clean_stuck(new_dt[[col]], new_sources[[col]],
+                              stuck_no_dump)
+        new_dt[[col]] <- result$values
+        new_sources[[col]] <- result$sources
+      }
     }
   }
 
   # Step 3: Clean outliers (STL-aware detection on cleaned data)
-  for (col in value_cols) {
-    outliers <- detect_outliers_iqr(new_dt[[col]], timestamps,
-                                    k = config$iqr_k,
-                                    time_step = time_step)
-    if (nrow(outliers) > 0) {
-      result <- clean_outliers(new_dt[[col]], new_sources[[col]],
-                               outliers, timestamps, time_step)
-      new_dt[[col]] <- result$values
-      new_sources[[col]] <- result$sources
+  if ("outliers" %in% operations) {
+    for (col in value_cols) {
+      outliers <- detect_outliers_iqr(new_dt[[col]], timestamps,
+                                      k = config$iqr_k,
+                                      time_step = time_step)
+      if (nrow(outliers) > 0) {
+        result <- clean_outliers(new_dt[[col]], new_sources[[col]],
+                                 outliers, timestamps, time_step)
+        new_dt[[col]] <- result$values
+        new_sources[[col]] <- result$sources
     }
   }
 
