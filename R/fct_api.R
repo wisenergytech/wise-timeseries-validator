@@ -240,6 +240,7 @@ clean_timeseries <- function(data,
                                  outliers, timestamps, time_step)
         new_dt[[col]] <- result$values
         new_sources[[col]] <- result$sources
+      }
     }
   }
 
