@@ -146,10 +146,17 @@ clean_timeseries <- function(data,
     stop("No numeric columns found to clean.")
   }
 
-  # Initialize data_source tracking
+  # Initialize data_source tracking (preserve existing if available)
   sources <- list()
   for (col in value_cols) {
-    sources[[col]] <- rep("measured", nrow(dt))
+    ds_col <- paste0(col, "_data_source")
+    if (ds_col %in% names(dt)) {
+      sources[[col]] <- as.character(dt[[ds_col]])
+    } else if ("data_source" %in% names(dt)) {
+      sources[[col]] <- as.character(dt[["data_source"]])
+    } else {
+      sources[[col]] <- rep("measured", nrow(dt))
+    }
   }
 
   # Step 1: Fill gaps (expands rows, 3-tier: L1/L2/L3)
@@ -207,10 +214,14 @@ clean_timeseries <- function(data,
 
   timestamps <- new_timestamps
 
-  # Step 2: Clean stuck-dump patterns
+  # Step 2: Clean stuck-dump patterns (only on "measured" values)
   if ("stuck" %in% operations) {
     for (col in value_cols) {
-      stuck <- detect_stuck_rle(new_dt[[col]], timestamps,
+      # Mask non-measured values to NA so detection skips them
+      vals_for_detect <- new_dt[[col]]
+      is_measured <- new_sources[[col]] == "measured"
+      vals_for_detect[!is_measured] <- NA_real_
+      stuck <- detect_stuck_rle(vals_for_detect, timestamps,
                                 min_run = config$rle_min_run,
                                 dump_factor = config$dump_factor)
       if (nrow(stuck) > 0 && any(stuck$has_dump)) {
@@ -229,10 +240,14 @@ clean_timeseries <- function(data,
     }
   }
 
-  # Step 3: Clean outliers (STL-aware detection on cleaned data)
+  # Step 3: Clean outliers (only on "measured" values)
   if ("outliers" %in% operations) {
     for (col in value_cols) {
-      outliers <- detect_outliers_iqr(new_dt[[col]], timestamps,
+      # Mask non-measured values so detection skips them
+      vals_for_detect <- new_dt[[col]]
+      is_measured <- new_sources[[col]] == "measured"
+      vals_for_detect[!is_measured] <- NA_real_
+      outliers <- detect_outliers_iqr(vals_for_detect, timestamps,
                                       k = config$iqr_k,
                                       time_step = time_step)
       if (nrow(outliers) > 0) {

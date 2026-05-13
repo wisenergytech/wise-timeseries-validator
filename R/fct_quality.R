@@ -82,23 +82,26 @@ detect_outliers_iqr <- function(values, timestamps, k = 3,
   non_na <- !is.na(values)
   if (sum(non_na) < 10) return(empty)
 
-  # Try STL-based detection (forecast::tsoutliers)
-  # tsoutliers handles NAs internally via na.interp
-  stl_idx <- tryCatch({
-    freq <- .infer_frequency(time_step)
-    if (!is.null(freq) && freq >= 2 && sum(non_na) >= freq * 2) {
-      # Fill NAs temporarily for STL decomposition
-      vals_filled <- zoo::na.approx(values, na.rm = FALSE)
-      vals_filled[is.na(vals_filled)] <- stats::median(values, na.rm = TRUE)
-      ts_obj <- stats::ts(vals_filled, frequency = freq)
-      outlier_info <- forecast::tsoutliers(ts_obj, iterate = 2)
-      # Only keep indices that were not NA in original
-      idx <- outlier_info$index
-      idx[non_na[idx]]
-    } else {
-      NULL
-    }
-  }, error = function(e) NULL)
+  # Only run detection on non-NA values. If > 20% NA, skip STL
+  # (filling NAs with median corrupts the decomposition)
+  na_pct <- 1 - sum(non_na) / length(values)
+
+  stl_idx <- NULL
+  if (na_pct < 0.2) {
+    stl_idx <- tryCatch({
+      freq <- .infer_frequency(time_step)
+      if (!is.null(freq) && freq >= 2 && sum(non_na) >= freq * 2) {
+        vals_filled <- zoo::na.approx(values, na.rm = FALSE)
+        vals_filled[is.na(vals_filled)] <- stats::median(values,
+          na.rm = TRUE)
+        ts_obj <- stats::ts(vals_filled, frequency = freq)
+        outlier_info <- forecast::tsoutliers(ts_obj, iterate = 2)
+        idx <- outlier_info$index
+        # Only keep indices that were not NA in original
+        idx[non_na[idx]]
+      } else NULL
+    }, error = function(e) NULL)
+  }
 
   if (!is.null(stl_idx) && length(stl_idx) > 0) {
     return(data.table::data.table(
@@ -108,18 +111,16 @@ detect_outliers_iqr <- function(values, timestamps, k = 3,
     ))
   }
 
-  # Fallback: delta-only IQR (not absolute — avoids flagging
-  # natural day/night amplitude as outliers)
+  # Fallback: delta-only on non-NA values (avoids false positives
+  # from day/night amplitude and NA-boundary jumps)
   .detect_outliers_delta(values, timestamps, k)
 }
 
-#' Fallback delta-only outlier detection
+#' Fallback delta-only outlier detection on non-NA values
 #'
-#' Only flags points where the consecutive difference (jump) is extreme.
-#' Does NOT flag absolute values — this avoids false positives from
-#' natural day/night cycles or seasonal amplitude variation.
-#' A point is flagged if BOTH the incoming and outgoing deltas are extreme
-#' (isolated spike), not just one (which could be a legitimate level shift).
+#' Compresses out NA values before computing deltas, so that gaps
+#' don't create false jumps at NA boundaries. Only flags isolated
+#' spikes (both incoming and outgoing deltas are extreme).
 #' @noRd
 .detect_outliers_delta <- function(values, timestamps, k = 3) {
   empty <- data.table::data.table(
@@ -128,10 +129,14 @@ detect_outliers_iqr <- function(values, timestamps, k = 3,
     method = character(0)
   )
 
-  non_na <- !is.na(values)
-  if (sum(non_na) < 10) return(empty)
+  # Work only on non-NA values to avoid NA-boundary false positives
+  non_na_idx <- which(!is.na(values))
+  if (length(non_na_idx) < 10) return(empty)
 
-  deltas <- c(NA_real_, diff(values))
+  clean_vals <- values[non_na_idx]
+  clean_ts <- timestamps[non_na_idx]
+
+  deltas <- c(NA_real_, diff(clean_vals))
   clean_deltas <- deltas[!is.na(deltas)]
   if (length(clean_deltas) < 10) return(empty)
 
@@ -144,17 +149,16 @@ detect_outliers_iqr <- function(values, timestamps, k = 3,
 
   # A spike = extreme jump IN followed by extreme jump OUT
   delta_in_extreme <- !is.na(deltas) & (deltas < lower | deltas > upper)
-  delta_out <- c(diff(values), NA_real_)
+  delta_out <- c(diff(clean_vals), NA_real_)
   delta_out_extreme <- !is.na(delta_out) &
     (delta_out < lower | delta_out > upper)
 
-  # Both directions extreme = isolated spike (not a level shift)
-  spike_idx <- which(delta_in_extreme & delta_out_extreme & non_na)
+  spike_idx <- which(delta_in_extreme & delta_out_extreme)
   if (length(spike_idx) == 0) return(empty)
 
   data.table::data.table(
-    timestamp = timestamps[spike_idx],
-    value = values[spike_idx],
+    timestamp = clean_ts[spike_idx],
+    value = clean_vals[spike_idx],
     method = rep("delta_spike", length(spike_idx))
   )
 }
